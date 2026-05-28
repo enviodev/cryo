@@ -14,6 +14,7 @@ use eyre::Result;
 #[allow(unreachable_code)]
 #[allow(clippy::needless_return)]
 async fn main() -> Result<()> {
+    dotenvy::dotenv().ok();
     let args = Args::parse();
     match run::run(args).await {
         Ok(Some(freeze_summary)) if freeze_summary.errored.is_empty() => Ok(()),

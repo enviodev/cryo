@@ -13,6 +13,7 @@ mod remember;
 mod run;
 
 // used in main.rs but not lib.rs
+use dotenvy as _;
 use eyre as _;
 use tokio as _;
 

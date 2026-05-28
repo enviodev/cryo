@@ -58,6 +58,7 @@ pub(crate) async fn parse_source(args: &Args) -> Result<Source, ParseError> {
         rate_limiter: rate_limiter.into(),
         rpc_url,
         provider,
+        hypersync: cryo_freeze::init_hypersync_client(chain_id),
         labels: SourceLabels {
             max_concurrent_requests: args.max_concurrent_requests,
             max_requests_per_second: args.requests_per_second.map(|x| x as u64),

@@ -115,7 +115,15 @@ macro_rules! define_datatypes {
             let task = match datatype {
                 MetaDatatype::Scalar(datatype) => {
                     let inner_request_size = if datatype.use_block_ranges() {
-                        Some(source.inner_request_size)
+                        if source.hypersync.is_some() {
+                            // HyperSync paginates internally, so fetch each partition in a
+                            // single query instead of splitting it into `inner_request_size`
+                            // sub-requests. u32::MAX exceeds any realistic partition span
+                            // while staying clear of u64 overflow in range chunking.
+                            Some(u32::MAX as u64)
+                        } else {
+                            Some(source.inner_request_size)
+                        }
                     } else {
                         None
                     };
@@ -156,7 +164,15 @@ macro_rules! define_datatypes {
             let task = match datatype {
                 MetaDatatype::Scalar(datatype) => {
                     let inner_request_size = if datatype.use_block_ranges() {
-                        Some(source.inner_request_size)
+                        if source.hypersync.is_some() {
+                            // HyperSync paginates internally, so fetch each partition in a
+                            // single query instead of splitting it into `inner_request_size`
+                            // sub-requests. u32::MAX exceeds any realistic partition span
+                            // while staying clear of u64 overflow in range chunking.
+                            Some(u32::MAX as u64)
+                        } else {
+                            Some(source.inner_request_size)
+                        }
                     } else {
                         None
                     };

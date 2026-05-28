@@ -24,6 +24,7 @@ clap_cryo = { workspace = true }
 color-print = { workspace = true }
 colored = { workspace = true }
 cryo_freeze = { workspace = true }
+dotenvy = "0.15"
 eyre = { workspace = true }
 governor = { workspace = true }
 hex = { workspace = true }

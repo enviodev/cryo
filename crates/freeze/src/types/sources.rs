@@ -56,6 +56,8 @@ pub struct Source {
     pub semaphore: Arc<Option<Semaphore>>,
     /// rate limiter for controlling request rate
     pub rate_limiter: Arc<Option<RateLimiter>>,
+    /// optional HyperSync client used as a fast path for log queries
+    pub hypersync: Option<hypersync_client::Client>,
     /// Labels (these are non-functional)
     pub labels: SourceLabels,
 }
@@ -144,6 +146,7 @@ impl Source {
             },
             rate_limiter: rate_limiter.into(),
             semaphore: semaphore.into(),
+            hypersync: init_hypersync_client(chain_id),
         };
 
         Ok(source)
@@ -153,6 +156,29 @@ impl Source {
     // pub fn rate_limit(mut self, _requests_per_second: u64) -> Source {
     //     todo!();
     // }
+}
+
+/// Build a HyperSync client if a HyperSync API key is set in the environment.
+/// Reads `ENVIO_API_TOKEN` (or `HYPERSYNC_API_KEY`). URL defaults to the chain-specific public
+/// endpoint and can be overridden with `HYPERSYNC_URL`.
+pub fn init_hypersync_client(chain_id: u64) -> Option<hypersync_client::Client> {
+    let api_key = std::env::var("ENVIO_API_TOKEN")
+        .or_else(|_| std::env::var("HYPERSYNC_API_KEY"))
+        .ok()
+        .filter(|s| !s.is_empty())?;
+    let mut builder = hypersync_client::Client::builder().chain_id(chain_id).api_token(api_key);
+    if let Ok(url) = std::env::var("HYPERSYNC_URL") {
+        if !url.is_empty() {
+            builder = builder.url(url);
+        }
+    }
+    match builder.build() {
+        Ok(client) => Some(client),
+        Err(e) => {
+            eprintln!("could not build HyperSync client, falling back to RPC: {}", e);
+            None
+        }
+    }
 }
 
 fn parse_rpc_url(rpc_url: Option<String>) -> String {
@@ -227,6 +253,9 @@ type Result<T> = ::core::result::Result<T, CollectError>;
 impl Source {
     /// Returns an array (possibly empty) of logs that match the filter
     pub async fn get_logs(&self, filter: &Filter) -> Result<Vec<Log>> {
+        if let Some(client) = &self.hypersync {
+            return get_logs_hypersync(client, filter).await
+        }
         let _permit = self.permit_request().await;
         Self::map_err(self.provider.get_logs(filter).await)
     }
@@ -1003,6 +1032,111 @@ impl Source {
 
 use crate::err;
 use std::collections::BTreeMap;
+
+/// Fetch logs via HyperSync, translating an alloy `Filter` into a HyperSync query and the
+/// HyperSync response back into alloy `Log` values so downstream transforms are unchanged.
+async fn get_logs_hypersync(
+    client: &hypersync_client::Client,
+    filter: &Filter,
+) -> Result<Vec<Log>> {
+    use hypersync_client::{
+        format::{Address as HsAddress, LogArgument},
+        net_types::{FieldSelection, LogField, LogFilter, LogSelection, Query},
+        StreamConfig,
+    };
+
+    // build address + topic filters from the alloy filter (byte-level to avoid type-version clash)
+    let mut log_filter = LogFilter::default();
+    for address in filter.address.iter() {
+        let hs_address = HsAddress::try_from(address.as_slice())
+            .map_err(|e| err(&format!("invalid hypersync address: {}", e)))?;
+        log_filter.address.push(hs_address);
+    }
+    let mut topic_lists: Vec<Vec<LogArgument>> = Vec::new();
+    for topic_set in filter.topics.iter() {
+        let mut list = Vec::new();
+        for topic in topic_set.iter() {
+            let arg = LogArgument::try_from(topic.as_slice())
+                .map_err(|e| err(&format!("invalid hypersync topic: {}", e)))?;
+            list.push(arg);
+        }
+        topic_lists.push(list);
+    }
+    // drop trailing wildcard positions so they aren't sent needlessly
+    while matches!(topic_lists.last(), Some(list) if list.is_empty()) {
+        topic_lists.pop();
+    }
+    for list in topic_lists {
+        log_filter.topics.push(list);
+    }
+
+    // alloy block ranges are inclusive; hypersync to_block is exclusive
+    let from_block = filter.get_from_block().unwrap_or(0);
+    let to_block = filter.get_to_block().map(|b| b + 1);
+
+    let log_fields = [
+        LogField::BlockNumber,
+        LogField::BlockHash,
+        LogField::TransactionHash,
+        LogField::TransactionIndex,
+        LogField::LogIndex,
+        LogField::Address,
+        LogField::Data,
+        LogField::Topic0,
+        LogField::Topic1,
+        LogField::Topic2,
+        LogField::Topic3,
+        LogField::Removed,
+    ]
+    .into_iter()
+    .collect();
+    let field_selection = FieldSelection { log: log_fields, ..Default::default() };
+
+    let query = Query {
+        from_block,
+        to_block,
+        logs: vec![LogSelection::new(log_filter)],
+        field_selection,
+        ..Default::default()
+    };
+
+    let response = client
+        .collect(query, StreamConfig::default())
+        .await
+        .map_err(|e| err(&format!("hypersync query failed: {}", e)))?;
+
+    let mut logs = Vec::new();
+    for batch in response.data.logs {
+        for hs_log in batch {
+            logs.push(convert_hypersync_log(hs_log)?);
+        }
+    }
+    Ok(logs)
+}
+
+/// Convert a HyperSync log into an alloy `Log` via raw bytes.
+fn convert_hypersync_log(hs_log: hypersync_client::simple_types::Log) -> Result<Log> {
+    use alloy::primitives::{Log as PrimLog, LogData};
+
+    let address = hs_log
+        .address
+        .map(|a| Address::from_slice(a.as_ref()))
+        .ok_or_else(|| err("hypersync log missing address"))?;
+    let topics: Vec<B256> =
+        hs_log.topics.iter().flatten().map(|t| B256::from_slice(t.as_ref())).collect();
+    let data = hs_log.data.map(|d| Bytes::from(d.as_ref().to_vec())).unwrap_or_default();
+
+    Ok(Log {
+        inner: PrimLog { address, data: LogData::new_unchecked(topics, data) },
+        block_hash: hs_log.block_hash.map(|h| B256::from_slice(h.as_ref())),
+        block_number: hs_log.block_number.map(|n| *n),
+        block_timestamp: None,
+        transaction_hash: hs_log.transaction_hash.map(|h| B256::from_slice(h.as_ref())),
+        transaction_index: hs_log.transaction_index.map(|n| *n),
+        log_index: hs_log.log_index.map(|n| *n),
+        removed: hs_log.removed.unwrap_or(false),
+    })
+}
 
 fn parse_geth_diff_object(map: serde_json::Map<String, serde_json::Value>) -> Result<DiffMode> {
     let pre: BTreeMap<Address, AccountState> = serde_json::from_value(map["pre"].clone())
