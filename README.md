@@ -15,10 +15,11 @@ to discuss cryo, check out [the telegram group](https://t.me/paradigm_data)
 ## Contents
 
 1. [Example Usage](#example-usage)
-2. [Installation](#installation)
-3. [Data Schema](#data-schemas)
-4. [Code Guide](#code-guide)
-5. [Documentation](#documentation)
+2. [HyperSync data source](#hypersync-data-source)
+3. [Installation](#installation)
+4. [Data Schema](#data-schemas)
+5. [Code Guide](#code-guide)
+6. [Documentation](#documentation)
     1. [Basics](#cryo-help)
     2. [Syntax](#cryo-syntax)
     3. [Datasets](#cryo-datasets)
@@ -39,6 +40,47 @@ use as `cryo <dataset> [OPTIONS]`
 For a more complex example, see the [Uniswap Example](./examples/uniswap.sh).
 
 `cryo` uses `ETH_RPC_URL` env var as the data source unless `--rpc <url>` is given
+
+## HyperSync data source
+
+This fork can use [HyperSync](https://docs.envio.dev/docs/HyperSync/overview) as a fast path for log
+queries (`logs`, `erc20_transfers`, `erc20_approvals`, `erc721_transfers`). When a HyperSync API key
+is present it serves those datasets; everything else (and chain-id detection) still uses RPC.
+
+#### Setup
+
+Put your keys in a `.env` file in the working directory (auto-loaded):
+
+```bash
+ENVIO_API_TOKEN="<your-hypersync-api-key>"
+ETH_RPC_URL="<your-rpc-url>"
+```
+
+HyperSync activates whenever `ENVIO_API_TOKEN` (or `HYPERSYNC_API_KEY`) is set. Unset it to fall back
+to pure RPC. The HyperSync endpoint defaults to the chain's public URL and can be overridden with
+`HYPERSYNC_URL`.
+
+#### Demo commands
+
+Extract all logs across 1,000 blocks (HyperSync vs RPC for the same range produces identical output):
+
+```bash
+cryo logs --blocks 18000000:18001000
+```
+
+Extract + decode Uniswap v3 `PoolCreated` events (bounded range so it finishes quickly):
+
+```bash
+cryo logs \
+    --blocks 12369000:12380000 \
+    --contract 0x1f98431c8ad98523631ae4a59f267346ea31f984 \
+    --event-signature "PoolCreated(address indexed token0, address indexed token1, uint24 indexed fee, int24 tickSpacing, address pool)" \
+    --topic0 0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118 \
+    --csv
+```
+
+Both commands read `ETH_RPC_URL` from the environment, so no `--rpc` flag is needed. To force the RPC
+path for comparison, run with `ENVIO_API_TOKEN=` (empty).
 
 ## Installation
 
